@@ -1,0 +1,545 @@
+---
+title: "INIFINALTA"
+author: "Hafizh"
+date: "2024-12-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#import dataset
+
+```{r}
+library(tidyverse)
+library(dslabs)
+library(tidymodels)
+library(readxl)
+library(here)
+library(dplyr)
+```
+
+#Import Data
+
+```{r}
+path = here('data_raw','dataMinyakMentah.xlsx')
+data_minyak = read_excel(path)
+data_minyak 
+```
+#Rename Data
+```{r}
+data_minyak <- data_minyak %>%
+  rename(
+    WTI = `Cushing, OK WTI Spot Price FOB (Dollars per Barrel)`,
+    EBS = `Europe Brent Spot Price FOB (Dollars per Barrel)`
+  )
+
+colnames(data_minyak)
+```
+
+#Pisahkan Data
+```{r}
+# Pilih hanya kolom Date dan WTI
+data_wti <- data_minyak %>%
+  select(Date, WTI)
+# Pilih hanya kolom Date dan WTI
+data_ebs <- data_minyak %>%
+  select(Date, EBS)
+
+# Tampilkan tabel baru
+head(data_wti)
+
+```
+
+#Mengubah data menjadi t-series dan menangani null 
+```{r}
+# Load library yang diperlukan
+library(zoo)
+
+# Langkah 1: Mengonversi data menjadi time series harian dengan tanggal yang tidak lengkap
+data_wti$Date <- as.Date(data_wti$Date)
+
+# Langkah 2: Membuat rangkaian tanggal lengkap dari tanggal pertama hingga terakhir data
+date_sequence <- seq(from = min(data_wti$Date), to = max(data_wti$Date), by = "day")
+
+# Langkah 3: Menggabungkan rangkaian tanggal dengan data asli
+data_full <- data.frame(Date = date_sequence)
+data_full$WTI <- merge(data_full, data_wti, by = "Date", all.x = TRUE)$WTI
+
+# Langkah 4: Mengisi nilai yang hilang menggunakan interpolasi (atau bisa menggunakan na.locf untuk nilai sebelumnya)
+data_full$WTI <- zoo::na.approx(data_full$WTI, rule = 2)
+
+# Langkah 5: Menyimpan data lengkap ke dalam data_wti_full
+data_wti_full <- data_full
+
+# Langkah 6: Mengonversi menjadi time series
+data_wti_ts <- ts(data_wti_full$WTI, start = c(1986, 1), frequency = 365)  # Sesuaikan dengan frekuensi harian
+
+# Print data_wti_full untuk memeriksa hasilnya
+head(data_wti_full)
+
+```
+
+#Visualisasi Data
+```{r}
+data_wti_full$Date <- as.Date(data_wti_full$Date)
+ggplot(data_wti_full, aes(x = Date, y = WTI)) +
+  geom_line(color = "blue") +
+  labs(title = "Harga WTI dengan Area", x = "Tanggal", y = "Harga WTI")+
+    scale_y_continuous(
+    breaks = seq(0, max(data_wti_full$WTI, na.rm = TRUE), by = 10) # Kelipatan 1 pada sumbu Y
+  )+
+  scale_x_date(
+    breaks = seq(min(data_wti_full$Date), max(data_wti_full$Date), by = "2 years"),
+    labels = scales::date_format("%Y") # Format hanya menampilkan tahun
+  )
+
+```
+#PreProccessing Data
+```{r}
+str(data_wti_full$WTI)
+summary(data_wti_full$WTI)
+```
+#Uji Stasioner
+```{r}
+library(tseries)
+# Uji ADF WTI Clean
+adf_test_WTI = adf.test(data_wti_full$WTI, alternative = "stationary")
+cat("P-value ADF Test:", adf_test_WTI$p.value, "\n")
+
+if (adf_test_WTI$p.value < 0.05) {
+  cat("Data WTI stasioner.\n")
+} else {
+  cat("Data WTI tidak stasioner, perlu diferensiasi.\n")
+}
+```
+#Men Stasionerkan Data
+```{r}
+
+
+# Melakukan differencing pertama untuk membuat data stasioner
+data_diff <- diff(data_wti_ts)
+
+# Uji stasioneritas setelah differencing
+adf_test_diff <- adf.test(data_diff, alternative = "stationary")
+print(adf_test_diff)
+
+# Jika data sudah stasioner, lanjutkan ke model ARIMA
+
+
+```
+#Membangun model arima
+```{r}
+# Membangun model ARIMA
+library(forecast)
+
+# Pilih hanya kolom WTI
+wti_arima <- data_wti_full %>%
+  select( WTI)
+model_arima <- auto.arima(wti_arima)
+
+# Lihat ringkasan model
+summary(model_arima)
+
+# Forecasting
+forecast_arima <- forecast(model_arima, h = 365)  # Forecast 1 tahun ke depan
+
+# Visualisasi Forecast
+autoplot(forecast_arima)
+
+```
+#Evaluasi_model
+```{r}
+checkresiduals(forecast_arima)
+```
+#Shiny
+```{r}
+library(shiny)
+ui <- fluidPage(
+  titlePanel("Aplikasi Prediksi Harga WTI"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h4("Pilih Rentang Tanggal"),
+      dateInput("start_date", "Tanggal Mulai:", 
+                min = min(data_wti_full$Date), 
+                max = max(data_wti_full$Date), 
+                value = min(data_wti_full$Date)),
+      
+      dateInput("end_date", "Tanggal Akhir:", 
+                min = min(data_wti_full$Date), 
+                max = max(data_wti_full$Date), 
+                value = max(data_wti_full$Date)),
+      
+      numericInput("forecast_days", 
+                   "Jumlah Hari Prediksi:", 
+                   value = 30, 
+                   min = 1),
+      
+      actionButton("update", "Tampilkan Grafik")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Grafik Data Asli", plotOutput("originalPlot")),
+        tabPanel("Grafik Prediksi", plotOutput("forecastPlot"))
+      )
+    )
+  )
+)
+server <- function(input, output) {
+  
+  # Reactive data subset berdasarkan input tanggal
+  filtered_data <- reactive({
+    data_wti_full %>%
+      filter(Date >= input$start_date & Date <= input$end_date)
+  })
+  
+  # Plot data asli
+  output$originalPlot <- renderPlot({
+    ggplot(data_wti_full, aes(x = Date, y = WTI)) +
+      geom_line(color = "blue") +
+      labs(title = "Harga WTI dari Waktu ke Waktu", x = "Tanggal", y = "Harga WTI (USD)") +
+      theme_minimal()
+    
+    ggplot(data_wti_full, aes(x = Date, y = WTI)) +
+  geom_line(color = "blue") +
+  labs(title = "Harga WTI dengan Area", x = "Tanggal", y = "Harga WTI")+
+    scale_y_continuous(
+    breaks = seq(0, max(data_wti_full$WTI, na.rm = TRUE), by = 10) # Kelipatan 1 pada sumbu Y
+  )+
+  scale_x_date(
+    breaks = seq(min(data_wti_full$Date), max(data_wti_full$Date), by = "2 years"),
+    labels = scales::date_format("%Y") # Format hanya menampilkan tahun
+  )
+  })
+  
+  # Reactive untuk membuat model ARIMA
+  model_arima <- reactive({
+    auto.arima(filtered_data()$WTI, seasonal = TRUE)
+  })
+  
+  # Plot prediksi berdasarkan ARIMA
+  output$forecastPlot <- renderPlot({
+    input$update # Trigger action button
+    
+    forecast_arima <- forecast(model_arima(), h = input$forecast_days)
+    
+    autoplot(forecast_arima) +
+      labs(title = paste("Prediksi Harga WTI", input$forecast_days, "Hari ke Depan"),
+           x = "Tanggal", y = "Harga WTI (USD)") +
+      theme_minimal()
+  })
+}
+
+# Jalankan aplikasi Shiny
+shinyApp(ui = ui, server = server)
+
+```
+#EBS
+#Mengubah data menjadi t-series dan menangani null
+```{r}
+# Load library yang diperlukan
+library(zoo)
+
+
+# Menghapus data dengan tanggal sebelum 1987-05-20
+# Menghapus data dari indeks 346 hingga 1
+data_ebs <- data_ebs[-(346:1), ]
+
+
+# Langkah 1: Mengonversi data menjadi time series harian dengan tanggal yang tidak lengkap
+data_ebs$Date <- as.Date(data_ebs$Date)
+
+# Langkah 2: Membuat rangkaian tanggal lengkap dari tanggal pertama hingga terakhir data
+date_sequence <- seq(from = min(data_ebs$Date), to = max(data_ebs$Date), by = "day")
+
+# Langkah 3: Menggabungkan rangkaian tanggal dengan data asli
+data_full <- data.frame(Date = date_sequence)
+data_full$EBS <- merge(data_full, data_ebs, by = "Date", all.x = TRUE)$EBS
+
+# Langkah 4: Mengisi nilai yang hilang menggunakan interpolasi (atau bisa menggunakan na.locf untuk nilai sebelumnya)
+data_full$EBS <- zoo::na.approx(data_full$EBS, rule = 2)
+
+# Langkah 5: Menyimpan data lengkap ke dalam data_wti_full
+data_ebs_full <- data_full
+
+# Langkah 6: Mengonversi menjadi time series
+data_ebs_ts <- ts(data_ebs_full$EBS, start = c(1987, 1), frequency = 365)  # Sesuaikan dengan frekuensi harian
+
+# Print data_wti_full untuk memeriksa hasilnya
+head(data_ebs_full)
+```
+#Visualisasi Data
+```{r}
+data_ebs_full$Date <- as.Date(data_ebs_full$Date)
+ggplot(data_ebs_full, aes(x = Date, y = EBS)) +
+  geom_area(fill = "red", alpha = 0.5) +
+  labs(title = "Harga EBS dengan Area", x = "Tanggal", y = "Harga EBS")+
+    scale_y_continuous(
+    breaks = seq(0, max(data_ebs_full$EBS, na.rm = TRUE), by = 10) # Kelipatan 1 pada sumbu Y
+  )+
+  scale_x_date(
+    breaks = seq(min(data_ebs_full$Date), max(data_ebs_full$Date), by = "2 years"),
+    labels = scales::date_format("%Y") # Format hanya menampilkan tahun
+  )
+
+```
+#PreProccessing Data
+```{r}
+str(data_ebs_full$EBS)
+summary(data_ebs_full$EBS)
+```
+#Uji Stasioner
+```{r}
+library(tseries)
+# Uji ADF EBS
+adf_test_EBS = adf.test(data_ebs_full$EBS, alternative = "stationary")
+cat("P-value ADF Test:", adf_test_EBS$p.value, "\n")
+
+if (adf_test_EBS$p.value < 0.05) {
+  cat("Data EBS stasioner.\n")
+} else {
+  cat("Data EBS tidak stasioner, perlu diferensiasi.\n")
+}
+```
+#Men Stasionerkan Data
+```{r}
+# Melakukan differencing untuk membuat data stasioner
+data_diff <- diff(data_ebs_ts)
+
+# Uji stasioneritas setelah differencing
+adf_test_diff <- adf.test(data_diff, alternative = "stationary")
+print(adf_test_diff)
+
+# Jika data sudah stasioner, lanjutkan ke model ARIMA
+
+
+```
+#Membangun model arima
+```{r}
+# Membangun model ARIMA
+library(forecast)
+
+# Pilih hanya kolom WTI
+ebs_arima <- data_ebs_full %>%
+  select( EBS)
+model_ebs <- auto.arima(ebs_arima)
+
+# Lihat ringkasan model
+summary(model_ebs)
+
+# Forecasting
+forecast_ebs <- forecast(model_ebs, h = 365)  # Forecast 1 tahun ke depan
+
+# Visualisasi Forecast
+autoplot(forecast_ebs)
+
+```
+#Evaluasi_model
+```{r}
+checkresiduals(forecast_ebs)
+```
+
+#shiny
+```{r}
+
+
+
+# UI Aplikasi Shiny
+ui <- fluidPage(
+  titlePanel("Aplikasi Prediksi Harga EBS"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h4("Pilih Rentang Tanggal"),
+      dateInput("start_date", "Tanggal Mulai:", 
+                min = min(data_ebs_full$Date), 
+                max = max(data_ebs_full$Date), 
+                value = min(data_ebs_full$Date)),
+      
+      dateInput("end_date", "Tanggal Akhir:", 
+                min = min(data_ebs_full$Date), 
+                max = max(data_ebs_full$Date), 
+                value = max(data_ebs_full$Date)),
+      
+      numericInput("forecast_days", 
+                   "Jumlah Hari Prediksi:", 
+                   value = 30, 
+                   min = 1),
+      
+      actionButton("update", "Tampilkan Grafik")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Grafik Data Asli EBS", plotOutput("ebsPlot")),
+        tabPanel("Grafik Prediksi EBS", plotOutput("ebsForecastPlot"))
+      )
+    )
+  )
+)
+
+# Server Aplikasi Shiny
+server <- function(input, output) {
+  
+  # Reactive data subset berdasarkan input tanggal untuk EBS
+  filtered_data_ebs <- reactive({
+    data_ebs_full %>%
+      filter(Date >= input$start_date & Date <= input$end_date)
+  })
+  
+  # Plot data asli EBS
+  output$ebsPlot <- renderPlot({
+    ggplot(data_ebs_full, aes(x = Date, y = EBS)) +
+      geom_area(fill = "red", alpha = 0.5) +
+      labs(title = "Harga EBS dengan Area", x = "Tanggal", y = "Harga EBS") +
+      scale_y_continuous(
+        breaks = seq(0, max(filtered_data_ebs()$EBS, na.rm = TRUE), by = 10)
+      ) +
+      scale_x_date(
+        breaks = seq(min(filtered_data_ebs()$Date), max(filtered_data_ebs()$Date), by = "2 years"),
+        labels = scales::date_format("%Y")
+      )
+  })
+  
+  # Forecasting dan Plot prediksi EBS
+  output$ebsForecastPlot <- renderPlot({
+    input$update # Trigger action button
+    
+    # Menghitung prediksi berdasarkan input forecast_days
+    forecast_ebs <- forecast(model_ebs, h = input$forecast_days)
+    
+    autoplot(forecast_ebs) +
+      labs(title = paste("Prediksi EBS", input$forecast_days, "Hari ke Depan"),
+           x = "Tanggal", y = "Harga EBS") +
+      theme_minimal()
+  })
+}
+
+# Jalankan aplikasi Shiny
+shinyApp(ui = ui, server = server)
+
+
+```
+
+## SHINY GABUNGAN
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(forecast)
+
+# UI Aplikasi Shiny
+ui <- fluidPage(
+  titlePanel("Aplikasi Prediksi Harga WTI dan EBS"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      tabsetPanel(
+        tabPanel(
+          "Pengaturan WTI",
+          dateInput("start_date_wti", "Tanggal Mulai WTI:", 
+                    min = min(data_wti_full$Date), 
+                    max = max(data_wti_full$Date), 
+                    value = min(data_wti_full$Date)),
+          
+          dateInput("end_date_wti", "Tanggal Akhir WTI:", 
+                    min = min(data_wti_full$Date), 
+                    max = max(data_wti_full$Date), 
+                    value = max(data_wti_full$Date)),
+          
+          numericInput("forecast_days_wti", 
+                       "Jumlah Hari Prediksi WTI:", 
+                       value = 30, 
+                       min = 1),
+          
+          actionButton("update_wti", "Tampilkan Grafik WTI")
+        ),
+        tabPanel(
+          "Pengaturan EBS",
+          dateInput("start_date_ebs", "Tanggal Mulai EBS:", 
+                    min = min(data_ebs_full$Date), 
+                    max = max(data_ebs_full$Date), 
+                    value = min(data_ebs_full$Date)),
+          
+          dateInput("end_date_ebs", "Tanggal Akhir EBS:", 
+                    min = min(data_ebs_full$Date), 
+                    max = max(data_ebs_full$Date), 
+                    value = max(data_ebs_full$Date)),
+          
+          numericInput("forecast_days_ebs", 
+                       "Jumlah Hari Prediksi EBS:", 
+                       value = 30, 
+                       min = 1),
+          
+          actionButton("update_ebs", "Tampilkan Grafik EBS")
+        )
+      )
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Grafik Data Asli WTI", plotOutput("wtiPlot")),
+        tabPanel("Grafik Prediksi WTI", plotOutput("wtiForecastPlot")),
+        tabPanel("Grafik Data Asli EBS", plotOutput("ebsPlot")),
+        tabPanel("Grafik Prediksi EBS", plotOutput("ebsForecastPlot"))
+      )
+    )
+  )
+)
+
+# Server Aplikasi Shiny
+server <- function(input, output) {
+  
+  # Data WTI
+  filtered_data_wti <- reactive({
+    data_wti_full %>%
+      filter(Date >= input$start_date_wti & Date <= input$end_date_wti)
+  })
+  
+  output$wtiPlot <- renderPlot({
+    ggplot(data_wti_full, aes(x = Date, y = WTI)) +
+      geom_line(color = "blue") +
+      labs(title = "Harga WTI dari Waktu ke Waktu", x = "Tanggal", y = "Harga WTI (USD)") +
+      theme_minimal()
+  })
+  
+  output$wtiForecastPlot <- renderPlot({
+    input$update_wti # Trigger action button
+    forecast_wti <- forecast(auto.arima(filtered_data_wti()$WTI), h = input$forecast_days_wti)
+    
+    autoplot(forecast_wti) +
+      labs(title = paste("Prediksi Harga WTI", input$forecast_days_wti, "Hari ke Depan"),
+           x = "Tanggal", y = "Harga WTI (USD)") +
+      theme_minimal()
+  })
+  
+  # Data EBS
+  filtered_data_ebs <- reactive({
+    data_ebs_full %>%
+      filter(Date >= input$start_date_ebs & Date <= input$end_date_ebs)
+  })
+  
+  output$ebsPlot <- renderPlot({
+    ggplot(data_ebs_full, aes(x = Date, y = EBS)) +
+      geom_line(color = "red") +
+      labs(title = "Harga EBS dari Waktu ke Waktu", x = "Tanggal", y = "Harga EBS (USD)") +
+      theme_minimal()
+  })
+  
+  output$ebsForecastPlot <- renderPlot({
+    input$update_ebs # Trigger action button
+    forecast_ebs <- forecast(auto.arima(filtered_data_ebs()$EBS), h = input$forecast_days_ebs)
+    
+    autoplot(forecast_ebs) +
+      labs(title = paste("Prediksi Harga EBS", input$forecast_days_ebs, "Hari ke Depan"),
+           x = "Tanggal", y = "Harga EBS (USD)") +
+      theme_minimal()
+  })
+}
+
+# Jalankan aplikasi Shiny
+shinyApp(ui = ui, server = server)
+```
+
